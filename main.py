@@ -8,6 +8,8 @@ from support.support_variables import *
 from support.support_functions import MainFileIO, GenUUID, DebugPrint
 from functionbar import FunctionBar
 from ViewController import MainWindow as ViewMainWindow
+
+MainWindow = ViewMainWindow  # for tests and verify_setup
 from pathlib import Path
 import subprocess
 from PySide6.QtCore import Qt, QSize

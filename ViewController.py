@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -103,6 +104,12 @@ class CommandBar(QFrame):
             self._layout.insertWidget(self._layout.count() - 2, button)
 
 
+# Page name <-> index for tests and navigation
+_PAGE_NAME_TO_INDEX = {"Home": 0, "ServerHome": 1, "NewServer": 2, "EditServer": 3, "Settings": 4}
+_INDEX_TO_PAGE_NAME = {v: k for k, v in _PAGE_NAME_TO_INDEX.items()}
+_PAGE_INDEX_FUNCTIONS = {2: [("Save", "servers.save"), ("Cancel", "servers.cancel")]}
+
+
 #== Main Application Window ==============================================
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -110,6 +117,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MyServer Pro")
         
         self.FileIO = MainFileIO()
+        self._server_InternalPrimaryHost_value = ""
+        self._server_InternalSecondaryHost_value = ""
+        self._server_ExternalPrimaryHost_value = ""
+        self._server_ExternalSecondaryHost_value = ""
 
         self._build_main_window()
         self._apply_style()
@@ -123,6 +134,9 @@ class MainWindow(QMainWindow):
         self._tab_bar = TabBar()
         layout.addWidget(self._tab_bar)
 
+        self._stack = QStackedWidget()
+        for _ in range(5):
+            self._stack.addWidget(QWidget())
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(24, 18, 24, 14)
@@ -147,6 +161,42 @@ class MainWindow(QMainWindow):
 
     def set_home_action(self, handler) -> None:
         self._tab_bar.set_home_action(handler)
+
+    def _get_page_info(self, entry, get_NameIndex=False, get_IndexName=False, get_Functions=False):
+        if get_NameIndex and isinstance(entry, str):
+            return _PAGE_NAME_TO_INDEX.get(entry, 0)
+        if get_IndexName and isinstance(entry, int):
+            return _INDEX_TO_PAGE_NAME.get(entry, "Home")
+        if get_Functions and isinstance(entry, int):
+            return _PAGE_INDEX_FUNCTIONS.get(entry, [])
+        return None
+
+    def _call_MainPage(self, name_or_index) -> None:
+        if isinstance(name_or_index, str) and name_or_index.isdigit():
+            self._stack.setCurrentIndex(int(name_or_index))
+        else:
+            idx = _PAGE_NAME_TO_INDEX.get(name_or_index, 0)
+            self._stack.setCurrentIndex(idx)
+
+    def _confirm_delete(self, name: str) -> bool:
+        if not name:
+            return False
+        reply = QMessageBox.question(
+            self, "Confirm", f"Delete {name}?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
+    def _get_payload(self, section: str, name: str, uuid: str) -> dict:
+        return {
+            uuid: True,
+            "Hosts": {
+                "Internal_Primary": getattr(self, "_server_InternalPrimaryHost_value", ""),
+                "Internal_Secondary": getattr(self, "_server_InternalSecondaryHost_value", ""),
+                "External_Primary": getattr(self, "_server_ExternalPrimaryHost_value", ""),
+                "External_Secondary": getattr(self, "_server_ExternalSecondaryHost_value", ""),
+            },
+        }
 
     def _apply_style(self) -> None:
         main_bg = "#1c1e2b"

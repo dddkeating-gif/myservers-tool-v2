@@ -1,5 +1,4 @@
 # This Python file uses the following encoding: utf-8
-# python3 -m unittest tests.py
 import os
 import unittest
 from unittest.mock import patch
@@ -18,8 +17,6 @@ class MainPageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.window = MainWindow()
 
-
-## _call_MainPage Tests
     def test_call_main_page_by_name(self) -> None:
         expected_index = self.window._get_page_info(entry="ServerHome", get_NameIndex=True)
         self.window._call_MainPage("ServerHome")
@@ -30,13 +27,13 @@ class MainPageTests(unittest.TestCase):
         self.assertEqual(self.window._stack.currentIndex(), 4)
 
     def test_confirm_delete_true_false(self) -> None:
-        with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
+        with patch("ViewController.QMessageBox.question", return_value=QMessageBox.Yes):
             self.assertTrue(self.window._confirm_delete("ServerA"))
-        with patch("main.QMessageBox.question", return_value=QMessageBox.No):
+        with patch("ViewController.QMessageBox.question", return_value=QMessageBox.No):
             self.assertFalse(self.window._confirm_delete("ServerA"))
 
     def test_confirm_delete_empty_name(self) -> None:
-        with patch("main.QMessageBox.question") as mocked:
+        with patch("ViewController.QMessageBox.question") as mocked:
             self.assertFalse(self.window._confirm_delete(""))
             mocked.assert_not_called()
 
