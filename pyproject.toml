@@ -1,5 +1,5 @@
 [project]
-name = "PySide Project"
+name = "myservers-tool-v2"
 
 [tool.pyside6-project]
-files = ["main.py"]
+files = ["myservers/app.py"]

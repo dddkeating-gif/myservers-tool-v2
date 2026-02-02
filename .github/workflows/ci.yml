@@ -24,10 +24,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Import sanity
+      - name: Import sanity (v2)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -c "import main; import myservers.core.storage; from myservers.core.storage import JsonStore"
+        run: python -c "import myservers; import myservers.storage.json_store; import myservers.ui.main_window"
 
       - name: Run verify_setup
         env:

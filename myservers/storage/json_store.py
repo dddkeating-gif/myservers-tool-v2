@@ -1,4 +1,5 @@
-"""Minimal JSON file store: section/key CRUD. No secrets—use keyring for credentials."""
+"""Minimal JSON file store: section/key CRUD. No secrets—use keyring for credentials.
+Legacy-compatible API."""
 import json
 from pathlib import Path
 

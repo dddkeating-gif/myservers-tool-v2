@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify project setup: paths, core imports, JsonStore CRUD, optional GUI."""
+"""Verify v2 setup: paths, myservers imports, JsonStore CRUD, optional GUI."""
 from __future__ import annotations
 
 import os
@@ -20,17 +20,19 @@ def main() -> int:
         return 1
     print("Required paths OK")
 
-    # 2) Import core modules + JsonStore
+    # 2) Import v2 modules: myservers, myservers.storage.json_store, myservers.ui.main_window
     sys.path.insert(0, str(REPO_ROOT))
     try:
-        from support.support_functions import MainFileIO  # noqa: F401
-        from myservers.core.storage import JsonStore
+        import myservers  # noqa: F401
+        import myservers.storage.json_store  # noqa: F401
+        import myservers.ui.main_window  # noqa: F401
+        from myservers.storage.json_store import JsonStore
     except Exception as e:
         print(f"Import failed: {e}", file=sys.stderr)
         return 1
     print("Core imports OK")
 
-    # 3) Minimal JsonStore CRUD using a temp file
+    # 3) JsonStore CRUD against temp JSON
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
         tmp_path = f.name
     try:
@@ -45,16 +47,16 @@ def main() -> int:
         Path(tmp_path).unlink(missing_ok=True)
     print("JsonStore CRUD OK")
 
-    # 4) Attempt GUI imports (PySide6 + MainWindow); if fail, SKIP GUI and exit 0
+    # 4) GUI import (PySide6 + MainWindow); if fail (headless/missing libs), SKIP and exit 0
     try:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
-        from main import MainWindow
+        from myservers.ui.main_window import MainWindow
         _app = QApplication.instance() or QApplication([])
         _win = MainWindow()
         del _win
         print("GUI imports OK")
-    except Exception as e:
+    except Exception:
         print("SKIP GUI")
         return 0
 
