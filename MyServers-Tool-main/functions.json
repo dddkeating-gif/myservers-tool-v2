@@ -1,0 +1,12 @@
+{
+  "Pages": {
+        "HomeView": {
+                "Add": "Add",
+                "OnSelect": {
+                        "Edit": "Edit",
+                        "Delete": "Delete"
+
+                }
+        }
+  }
+}
