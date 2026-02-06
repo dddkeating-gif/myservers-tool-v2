@@ -51,10 +51,18 @@ def main() -> int:
     try:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
+        from myservers.core.servers import ServerStore
+        from myservers.storage.json_store import JsonStore
         from myservers.ui.main_window import MainWindow
         _app = QApplication.instance() or QApplication([])
-        _win = MainWindow()
+        # Use a temp JsonStore so verify does not touch user data or home.
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f2:
+            tmp_store_path = f2.name
+        backend = JsonStore(tmp_store_path)
+        store = ServerStore(backend)
+        _win = MainWindow(store)
         del _win
+        Path(tmp_store_path).unlink(missing_ok=True)
         print("GUI imports OK")
     except Exception:
         print("SKIP GUI")

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional, Protocol, runtime_checkable
 
 from myservers.storage.json_store import JsonStore
 from myservers.core.models import Server, HostSet
 
 
+@runtime_checkable
+class Storage(Protocol):
+    def get(self, section: str, key: str | None = None, *, all_sections: bool = False) -> Any: ...
+
+    def set(self, section: str, key: str, value: dict) -> None: ...
+
+    def delete(self, section: str, key: str) -> None: ...
+
+
 class ServerStore:
-    """Server CRUD facade over JsonStore.
+    """Server CRUD facade over a storage backend (JsonStore, SqliteStore, etc.).
 
     Data shape in JSON:
     {
@@ -18,8 +27,12 @@ class ServerStore:
     }
     """
 
-    def __init__(self, path: Path | str, section: str = "Servers") -> None:
-        self._store = JsonStore(path)
+    def __init__(self, backend: Storage | Path | str, section: str = "Servers") -> None:
+        # Accept either a concrete backend instance or a filesystem path (legacy JSON).
+        if isinstance(backend, (str, Path)):
+            self._store: Storage = JsonStore(backend)
+        else:
+            self._store = backend
         self._section = section
 
     # -------- internal helpers ---------

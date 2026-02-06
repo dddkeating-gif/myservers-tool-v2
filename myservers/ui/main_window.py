@@ -6,8 +6,6 @@ from __future__ import annotations
 Business logic lives in myservers/core; storage in myservers/storage.
 """
 
-from pathlib import Path
-
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -77,12 +75,11 @@ class ServerDialog(QDialog):
 class MainWindow(QMainWindow):
     """v2 main window with thin UI and core-driven CRUD."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: ServerStore) -> None:
         super().__init__()
         self.setWindowTitle("MyServers")
 
-        data_path = Path(__file__).resolve().parent.parent / "servers.json"
-        self._store = ServerStore(data_path)
+        self._store = store
 
         central = QWidget()
         layout = QVBoxLayout(central)
