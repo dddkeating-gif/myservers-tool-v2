@@ -39,6 +39,7 @@ from myservers.core.import_ssh_config import parse_ssh_config, apply_ssh_config_
 from myservers.core.identities_store import IdentitiesStore, IdentityMeta, SshProfileMeta
 from myservers.core import identity as identity_core
 from myservers.core.web_links_store import WebLinksStore, WebLink
+from myservers.core.tags_store import TagStore, ServerFilterItem, filter_servers
 from myservers.core.actions import ActionsStore, ActionTemplate, ActionRun
 from myservers.connectors.host_select import choose_best_host
 from myservers.connectors.exec_ssh import build_ssh_invocation_string
@@ -784,14 +785,28 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MyServers")
 
         self._store = store
+        self._tag_store: TagStore | None = None
 
         central = QWidget()
         layout = QVBoxLayout(central)
         header = QLabel("MyServers v2")
         layout.addWidget(header)
 
+        # Search + tag filter row
+        search_row = QHBoxLayout()
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search by name, host or notes...")
+        self._tag_filter = QComboBox()
+        self._tag_filter.addItem("All tags")
+        search_row.addWidget(self._search_edit)
+        search_row.addWidget(self._tag_filter)
+        layout.addLayout(search_row)
+
         self._list = QListWidget()
         layout.addWidget(self._list)
+
+        self._details_label = QLabel("")
+        layout.addWidget(self._details_label)
 
         buttons = QHBoxLayout()
         self._add_btn = QPushButton("Add")
@@ -803,6 +818,7 @@ class MainWindow(QMainWindow):
         self._web_links_btn = QPushButton("Web Links...")
         self._open_web_btn = QPushButton("Open Web...")
         self._actions_btn = QPushButton("Actions...")
+        self._edit_tags_btn = QPushButton("Edit Tags...")
         self._import_btn = QPushButton("Import legacy JSON...")
         self._import_ssh_btn = QPushButton("Import SSH Config...")
         buttons.addWidget(self._add_btn)
@@ -814,6 +830,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self._web_links_btn)
         buttons.addWidget(self._open_web_btn)
         buttons.addWidget(self._actions_btn)
+        buttons.addWidget(self._edit_tags_btn)
         buttons.addWidget(self._import_btn)
         buttons.addWidget(self._import_ssh_btn)
         layout.addLayout(buttons)
@@ -827,8 +844,13 @@ class MainWindow(QMainWindow):
         self._web_links_btn.clicked.connect(self._on_edit_web_links)
         self._open_web_btn.clicked.connect(self._on_open_web)
         self._actions_btn.clicked.connect(self._on_open_actions)
+        self._edit_tags_btn.clicked.connect(self._on_edit_tags)
         self._import_btn.clicked.connect(self._on_import_legacy)
         self._import_ssh_btn.clicked.connect(self._on_import_ssh_config)
+
+        self._search_edit.textChanged.connect(self._refresh_list)
+        self._tag_filter.currentIndexChanged.connect(self._refresh_list)
+        self._list.currentItemChanged.connect(lambda *_: self._refresh_details())
 
         self.setCentralWidget(central)
         self._refresh_list()
@@ -837,12 +859,72 @@ class MainWindow(QMainWindow):
 
     def _refresh_list(self) -> None:
         self._list.clear()
-        for server in self._store.list_servers():
-            self._list.addItem(server.name)
+        servers = self._store.list_servers()
+
+        # Lazily initialize TagStore if SQLite backend is present
+        backend = getattr(self._store, "_store", None)
+        if isinstance(backend, SqliteStore):
+            if self._tag_store is None or self._tag_store._backend is not backend:  # type: ignore[attr-defined]
+                self._tag_store = TagStore(backend)
+        else:
+            self._tag_store = None
+
+        items_for_filter: list[ServerFilterItem] = []
+        tags_by_server: dict[str, list[str]] = {}
+
+        if self._tag_store is not None:
+            all_tags = self._tag_store.list_tags()
+            # Rebuild tag filter dropdown
+            current_tag = self._tag_filter.currentText()
+            self._tag_filter.blockSignals(True)
+            self._tag_filter.clear()
+            self._tag_filter.addItem("All tags")
+            for t in all_tags:
+                self._tag_filter.addItem(t)
+            # Try to preserve previous selection
+            if current_tag and current_tag in all_tags:
+                idx = self._tag_filter.findText(current_tag)
+                if idx != -1:
+                    self._tag_filter.setCurrentIndex(idx)
+            self._tag_filter.blockSignals(False)
+
+            for s in servers:
+                stags = self._tag_store.get_server_tags(s.name)
+                tags_by_server[s.name] = stags
+                items_for_filter.append(
+                    ServerFilterItem(name=s.name, hosts=s.hosts, notes=s.notes, tags=stags)
+                )
+        else:
+            for s in servers:
+                items_for_filter.append(ServerFilterItem(name=s.name, hosts=s.hosts, notes=s.notes, tags=[]))
+
+        query = self._search_edit.text()
+        selected_tag = self._tag_filter.currentText()
+        tag_filter_value = None if selected_tag == "All tags" else selected_tag
+        filtered = filter_servers(items_for_filter, query=query, tag=tag_filter_value)
+
+        for item in filtered:
+            self._list.addItem(item.name)
+
+        self._refresh_details()
 
     def _selected_name(self) -> str | None:
         item = self._list.currentItem()
         return item.text() if item is not None else None
+
+    def _refresh_details(self) -> None:
+        name = self._selected_name()
+        if not name:
+            self._details_label.setText("")
+            return
+        backend = getattr(self._store, "_store", None)
+        tags_text = ""
+        if isinstance(backend, SqliteStore):
+            tag_store = self._tag_store or TagStore(backend)
+            tags = tag_store.get_server_tags(name)
+            if tags:
+                tags_text = ", ".join(tags)
+        self._details_label.setText(f"Tags: {tags_text}" if tags_text else "Tags: (none)")
 
     def _on_open_actions(self) -> None:
         backend = self._ensure_sqlite_backend()
@@ -853,6 +935,41 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     # -------- actions ---------
+
+    def _on_edit_tags(self) -> None:
+        name = self._selected_name()
+        if not name:
+            QMessageBox.information(self, "Edit Tags", "Select a server first.")
+            return
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        tag_store = self._tag_store or TagStore(backend)
+        current_tags = tag_store.get_server_tags(name)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Edit Tags - {name}")
+        form = QFormLayout(dlg)
+        edit = QLineEdit()
+        edit.setText(", ".join(current_tags))
+        form.addRow("Tags (comma-separated)", edit)
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        raw = edit.text()
+        tags = [t.strip() for t in raw.split(",")]
+        tag_store.set_server_tags(name, tags)
+        self._tag_store = tag_store
+        self._refresh_list()
 
     def _on_add(self) -> None:
         dlg = ServerDialog(self)

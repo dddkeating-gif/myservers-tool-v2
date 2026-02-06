@@ -44,7 +44,8 @@ class ServerStore:
                 "Internal_Secondary": server.hosts.internal_secondary,
                 "External_Primary": server.hosts.external_primary,
                 "External_Secondary": server.hosts.external_secondary,
-            }
+            },
+            "Notes": server.notes,
         }
 
     def _deserialize(self, name: str, payload: dict) -> Server:
@@ -55,7 +56,8 @@ class ServerStore:
             external_primary=hosts_raw.get("External_Primary", ""),
             external_secondary=hosts_raw.get("External_Secondary", ""),
         )
-        return Server(name=name, hosts=hosts)
+        notes = (payload or {}).get("Notes", "") or ""
+        return Server(name=name, hosts=hosts, notes=notes)
 
     # -------- public API ---------
 
@@ -81,7 +83,7 @@ class ServerStore:
         bucket = self._store.get(self._section, None) or {}
         if name in bucket:
             raise ValueError("Server already exists")
-        self._store.set(self._section, name, self._serialize(Server(name=name, hosts=server.hosts)))
+        self._store.set(self._section, name, self._serialize(Server(name=name, hosts=server.hosts, notes=server.notes)))
 
     def update_server(self, original_name: str, server: Server) -> None:
         original_name = original_name.strip()
@@ -99,7 +101,11 @@ class ServerStore:
         # Rename if needed
         if new_name != original_name:
             self._store.delete(self._section, original_name)
-        self._store.set(self._section, new_name, self._serialize(Server(name=new_name, hosts=server.hosts)))
+        self._store.set(
+            self._section,
+            new_name,
+            self._serialize(Server(name=new_name, hosts=server.hosts, notes=server.notes)),
+        )
 
     def delete_server(self, name: str) -> None:
         name = name.strip()

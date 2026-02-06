@@ -15,4 +15,5 @@ class HostSet:
 class Server:
     name: str
     hosts: HostSet
+    notes: str = ""
 
