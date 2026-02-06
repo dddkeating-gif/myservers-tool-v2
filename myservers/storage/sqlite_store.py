@@ -88,7 +88,8 @@ class SqliteStore:
                 name             TEXT UNIQUE NOT NULL,
                 description      TEXT,
                 command_template TEXT NOT NULL,
-                requires_confirm INTEGER NOT NULL DEFAULT 1
+                requires_confirm INTEGER NOT NULL DEFAULT 1,
+                execution_target TEXT NOT NULL DEFAULT 'local' CHECK (execution_target IN ('local','ssh'))
             );
 
             CREATE TABLE IF NOT EXISTS action_runs (
@@ -169,6 +170,11 @@ class SqliteStore:
                 )
                 """
             )
+        # Add execution_target to actions if missing
+        cur.execute("PRAGMA table_info(actions)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "execution_target" not in cols:
+            cur.execute("ALTER TABLE actions ADD COLUMN execution_target TEXT NOT NULL DEFAULT 'local'")
         self._conn.commit()
 
     def _migrate_from_json(self, json_path: Path) -> None:

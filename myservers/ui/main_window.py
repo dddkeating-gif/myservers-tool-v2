@@ -24,6 +24,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QFileDialog,
+    QComboBox,
+    QCheckBox,
+    QTextEdit,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
 )
 
 from myservers.core.models import Server, HostSet
@@ -32,6 +38,9 @@ from myservers.core.import_legacy import import_legacy_into_store
 from myservers.core.identities_store import IdentitiesStore, IdentityMeta, SshProfileMeta
 from myservers.core import identity as identity_core
 from myservers.core.web_links_store import WebLinksStore, WebLink
+from myservers.core.actions import ActionsStore, ActionTemplate, ActionRun
+from myservers.connectors.host_select import choose_best_host
+from myservers.connectors.exec_ssh import build_ssh_invocation_string
 from myservers.storage.sqlite_store import SqliteStore
 from myservers.connectors.ssh_command import build_ssh_command
 
@@ -419,7 +428,351 @@ class WebLinkPickerDialog(QDialog):
         if item is None:
             return None
         link_id = int(item.data(Qt.UserRole))
-        return next((l for l in self._links if l.id == link_id), None)
+        return next((l for l in self._links if l.id == link_id), None        )
+
+
+class ActionDialog(QDialog):
+    """Edit action template."""
+
+    def __init__(self, parent: QWidget | None, action: ActionTemplate | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Action")
+        form = QFormLayout(self)
+        self._name_edit = QLineEdit()
+        self._desc_edit = QLineEdit()
+        self._template_edit = QLineEdit()
+        self._target_combo = QComboBox()
+        self._target_combo.addItems(["local", "ssh"])
+        self._confirm_check = QCheckBox("Requires confirmation")
+
+        if action is not None:
+            self._name_edit.setText(action.name)
+            self._desc_edit.setText(action.description or "")
+            self._template_edit.setText(action.command_template)
+            self._target_combo.setCurrentText(action.execution_target)
+            self._confirm_check.setChecked(action.requires_confirm)
+
+        form.addRow("Name", self._name_edit)
+        form.addRow("Description", self._desc_edit)
+        form.addRow("Command Template", self._template_edit)
+        form.addRow("Execution Target", self._target_combo)
+        form.addRow(self._confirm_check)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+    def get_action_data(self) -> tuple[str, str | None, str, bool, str]:
+        return (
+            self._name_edit.text().strip(),
+            self._desc_edit.text().strip() or None,
+            self._template_edit.text().strip(),
+            self._confirm_check.isChecked(),
+            self._target_combo.currentText(),
+        )
+
+
+class ActionsDialog(QDialog):
+    """Manage actions and run them."""
+
+    def __init__(self, parent: QWidget | None, actions_store: ActionsStore, server_store: ServerStore) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Actions")
+        self._actions_store = actions_store
+        self._server_store = server_store
+
+        layout = QVBoxLayout(self)
+        self._list = QListWidget()
+        layout.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        self._add = QPushButton("Add")
+        self._edit = QPushButton("Edit")
+        self._delete = QPushButton("Delete")
+        self._run = QPushButton("Run")
+        self._dry_run = QCheckBox("Dry Run")
+        self._history = QPushButton("History...")
+        btn_row.addWidget(self._add)
+        btn_row.addWidget(self._edit)
+        btn_row.addWidget(self._delete)
+        btn_row.addWidget(self._run)
+        btn_row.addWidget(self._dry_run)
+        btn_row.addWidget(self._history)
+        layout.addLayout(btn_row)
+
+        btns = QHBoxLayout()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btns.addWidget(close_btn)
+        layout.addLayout(btns)
+
+        self._add.clicked.connect(self._on_add)
+        self._edit.clicked.connect(self._on_edit)
+        self._delete.clicked.connect(self._on_delete)
+        self._run.clicked.connect(self._on_run)
+        self._history.clicked.connect(self._on_history)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._list.clear()
+        for action in self._actions_store.list_actions():
+            item = QListWidgetItem(f"{action.name} ({action.execution_target})")
+            item.setData(Qt.UserRole, action.id)
+            self._list.addItem(item)
+
+    def _selected_id(self) -> int | None:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        return int(item.data(Qt.UserRole))
+
+    def _on_add(self) -> None:
+        dlg = ActionDialog(self, None)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, desc, template, confirm, target = dlg.get_action_data()
+        if not name or not template:
+            QMessageBox.warning(self, "Action", "Name and command template are required.")
+            return
+        self._actions_store.create_action(name, desc, template, confirm, target)
+        self._refresh()
+
+    def _on_edit(self) -> None:
+        action_id = self._selected_id()
+        if action_id is None:
+            QMessageBox.information(self, "Action", "Select an action first.")
+            return
+        actions = self._actions_store.list_actions()
+        current = next((a for a in actions if a.id == action_id), None)
+        if current is None:
+            self._refresh()
+            return
+        dlg = ActionDialog(self, current)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, desc, template, confirm, target = dlg.get_action_data()
+        if not name or not template:
+            QMessageBox.warning(self, "Action", "Name and command template are required.")
+            return
+        self._actions_store.update_action(action_id, name, desc, template, confirm, target)
+        self._refresh()
+
+    def _on_delete(self) -> None:
+        action_id = self._selected_id()
+        if action_id is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete action",
+            "Delete selected action?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._actions_store.delete_action(action_id)
+        self._refresh()
+
+    def _on_run(self) -> None:
+        action_id = self._selected_id()
+        if action_id is None:
+            QMessageBox.information(self, "Run Action", "Select an action first.")
+            return
+        actions = self._actions_store.list_actions()
+        action = next((a for a in actions if a.id == action_id), None)
+        if action is None:
+            self._refresh()
+            return
+
+        # Pick server
+        servers = self._server_store.list_servers()
+        if not servers:
+            QMessageBox.information(self, "Run Action", "No servers available.")
+            return
+        if len(servers) == 1:
+            server_name = servers[0].name
+        else:
+            # Simple picker
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Select Server")
+            layout = QVBoxLayout(dlg)
+            server_list = QListWidget()
+            for s in servers:
+                server_list.addItem(s.name)
+            layout.addWidget(server_list)
+            btns = QHBoxLayout()
+            ok_btn = QPushButton("OK")
+            cancel_btn = QPushButton("Cancel")
+            ok_btn.clicked.connect(dlg.accept)
+            cancel_btn.clicked.connect(dlg.reject)
+            btns.addWidget(ok_btn)
+            btns.addWidget(cancel_btn)
+            layout.addLayout(btns)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            item = server_list.currentItem()
+            if item is None:
+                return
+            server_name = item.text()
+
+        server = self._server_store.get_server(server_name)
+        if not server:
+            QMessageBox.warning(self, "Run Action", "Server not found.")
+            return
+
+        dry_run = self._dry_run.isChecked()
+
+        # For SSH actions, show preview
+        if action.execution_target == "ssh":
+            host = choose_best_host(server)
+            if not host:
+                QMessageBox.warning(self, "Run Action", "No host available for SSH execution.")
+                return
+            from myservers.core.identities_store import IdentitiesStore
+            ident_store = IdentitiesStore(self._actions_store._backend)
+            ssh_profile = ident_store.get_ssh_profile(server_name)
+            identity = None
+            if ssh_profile and ssh_profile.identity_id:
+                identity = ident_store.get_identity(ssh_profile.identity_id)
+
+            # Render remote command
+            from myservers.core.actions import _render_template
+            ctx = {
+                "server.name": server.name,
+                "host": host,
+                "hosts.internal_primary": server.hosts.internal_primary,
+                "hosts.internal_secondary": server.hosts.internal_secondary,
+                "hosts.external_primary": server.hosts.external_primary,
+                "hosts.external_secondary": server.hosts.external_secondary,
+                "ssh.port": str(ssh_profile.port if ssh_profile else 22),
+            }
+            remote_cmd = _render_template(action.command_template, ctx)
+            ssh_invocation = build_ssh_invocation_string(server, ssh_profile, identity, remote_cmd)
+
+            if action.requires_confirm and not dry_run:
+                msg = f"Host: {host}\nSSH Command:\n{ssh_invocation}\n\nRemote Command:\n{remote_cmd}"
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm SSH Execution",
+                    msg,
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+        try:
+            run = self._actions_store.run_action(action_id, server_name, dry_run=dry_run)
+            status_msg = f"Status: {run.status}"
+            if run.exit_code is not None:
+                status_msg += f"\nExit code: {run.exit_code}"
+            QMessageBox.information(self, "Action Run", status_msg)
+        except Exception as exc:
+            QMessageBox.critical(self, "Run Action", f"Execution failed: {exc}")
+
+    def _on_history(self) -> None:
+        dlg = HistoryDialog(self, self._actions_store)
+        dlg.exec()
+
+
+class HistoryDialog(QDialog):
+    """View action execution history."""
+
+    def __init__(self, parent: QWidget | None, actions_store: ActionsStore) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Action History")
+        self._actions_store = actions_store
+
+        layout = QVBoxLayout(self)
+        self._table = QTableWidget()
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(["Time", "Server", "Action", "Status", "Exit Code", "Duration"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.itemDoubleClicked.connect(self._on_view_details)
+        layout.addWidget(self._table)
+
+        btns = QHBoxLayout()
+        view_btn = QPushButton("View Details")
+        close_btn = QPushButton("Close")
+        view_btn.clicked.connect(self._on_view_details)
+        close_btn.clicked.connect(self.accept)
+        btns.addWidget(view_btn)
+        btns.addWidget(close_btn)
+        layout.addLayout(btns)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        cur = self._actions_store._conn.cursor()
+        cur.execute(
+            """
+            SELECT ar.id, ar.started_at, ar.status, ar.exit_code, ar.duration_ms,
+                   s.name as server_name, a.name as action_name
+            FROM action_runs ar
+            JOIN servers s ON ar.server_id = s.id
+            JOIN actions a ON ar.action_id = a.id
+            ORDER BY ar.started_at DESC
+            LIMIT 100
+            """
+        )
+        rows = cur.fetchall()
+        self._table.setRowCount(len(rows))
+        for idx, row in enumerate(rows):
+            self._table.setItem(idx, 0, QTableWidgetItem(row["started_at"][:19] if row["started_at"] else ""))
+            self._table.setItem(idx, 1, QTableWidgetItem(row["server_name"]))
+            self._table.setItem(idx, 2, QTableWidgetItem(row["action_name"]))
+            self._table.setItem(idx, 3, QTableWidgetItem(row["status"]))
+            self._table.setItem(idx, 4, QTableWidgetItem(str(row["exit_code"]) if row["exit_code"] is not None else ""))
+            self._table.setItem(idx, 5, QTableWidgetItem(f"{row['duration_ms']}ms"))
+            self._table.item(idx, 0).setData(Qt.UserRole, row["id"])
+
+    def _on_view_details(self) -> None:
+        item = self._table.currentItem()
+        if item is None:
+            return
+        row = item.row()
+        run_id = int(self._table.item(row, 0).data(Qt.UserRole))
+        cur = self._actions_store._conn.cursor()
+        cur.execute(
+            """
+            SELECT command_rendered, stdout, stderr
+            FROM action_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+        row_data = cur.fetchone()
+        if row_data is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Run Details")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Command:"))
+        cmd_edit = QTextEdit()
+        cmd_edit.setPlainText(row_data["command_rendered"] or "")
+        cmd_edit.setReadOnly(True)
+        layout.addWidget(cmd_edit)
+        layout.addWidget(QLabel("Stdout:"))
+        out_edit = QTextEdit()
+        out_edit.setPlainText(row_data["stdout"] or "")
+        out_edit.setReadOnly(True)
+        layout.addWidget(out_edit)
+        layout.addWidget(QLabel("Stderr:"))
+        err_edit = QTextEdit()
+        err_edit.setPlainText(row_data["stderr"] or "")
+        err_edit.setReadOnly(True)
+        layout.addWidget(err_edit)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
 
 
 class MainWindow(QMainWindow):
@@ -448,6 +801,7 @@ class MainWindow(QMainWindow):
         self._copy_ssh_btn = QPushButton("Copy SSH Command")
         self._web_links_btn = QPushButton("Web Links...")
         self._open_web_btn = QPushButton("Open Web...")
+        self._actions_btn = QPushButton("Actions...")
         self._import_btn = QPushButton("Import legacy JSON...")
         buttons.addWidget(self._add_btn)
         buttons.addWidget(self._edit_btn)
@@ -457,6 +811,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self._copy_ssh_btn)
         buttons.addWidget(self._web_links_btn)
         buttons.addWidget(self._open_web_btn)
+        buttons.addWidget(self._actions_btn)
         buttons.addWidget(self._import_btn)
         layout.addLayout(buttons)
 
@@ -468,6 +823,7 @@ class MainWindow(QMainWindow):
         self._copy_ssh_btn.clicked.connect(self._on_copy_ssh_command)
         self._web_links_btn.clicked.connect(self._on_edit_web_links)
         self._open_web_btn.clicked.connect(self._on_open_web)
+        self._actions_btn.clicked.connect(self._on_open_actions)
         self._import_btn.clicked.connect(self._on_import_legacy)
 
         self.setCentralWidget(central)
@@ -483,6 +839,14 @@ class MainWindow(QMainWindow):
     def _selected_name(self) -> str | None:
         item = self._list.currentItem()
         return item.text() if item is not None else None
+
+    def _on_open_actions(self) -> None:
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        actions_store = ActionsStore(backend, self._store)
+        dlg = ActionsDialog(self, actions_store, self._store)
+        dlg.exec()
 
     # -------- actions ---------
 

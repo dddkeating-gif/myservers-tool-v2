@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from myservers.connectors.host_select import choose_best_host
 from myservers.connectors.exec_local import execute
+from myservers.connectors.exec_ssh import execute_ssh, build_ssh_invocation_string
 from myservers.core.identities_store import IdentitiesStore
 from myservers.core.models import Server
 from myservers.core.servers import ServerStore
@@ -22,6 +23,7 @@ class ActionTemplate:
     description: str | None
     command_template: str
     requires_confirm: bool
+    execution_target: str  # 'local' or 'ssh'
 
 
 @dataclass
@@ -53,7 +55,7 @@ class ActionsStore:
     def list_actions(self) -> List[ActionTemplate]:
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT id, name, description, command_template, requires_confirm FROM actions ORDER BY name"
+            "SELECT id, name, description, command_template, requires_confirm, execution_target FROM actions ORDER BY name"
         )
         return [
             ActionTemplate(
@@ -62,6 +64,7 @@ class ActionsStore:
                 description=row["description"],
                 command_template=row["command_template"],
                 requires_confirm=bool(row["requires_confirm"]),
+                execution_target=row["execution_target"] or "local",
             )
             for row in cur.fetchall()
         ]
@@ -72,14 +75,15 @@ class ActionsStore:
         description: str | None,
         command_template: str,
         requires_confirm: bool = True,
+        execution_target: str = "local",
     ) -> int:
         cur = self._conn.cursor()
         cur.execute(
             """
-            INSERT INTO actions(name, description, command_template, requires_confirm)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO actions(name, description, command_template, requires_confirm, execution_target)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (name.strip(), description, command_template, 1 if requires_confirm else 0),
+            (name.strip(), description, command_template, 1 if requires_confirm else 0, execution_target),
         )
         self._conn.commit()
         return int(cur.lastrowid)
@@ -91,15 +95,16 @@ class ActionsStore:
         description: str | None,
         command_template: str,
         requires_confirm: bool,
+        execution_target: str,
     ) -> None:
         cur = self._conn.cursor()
         cur.execute(
             """
             UPDATE actions
-            SET name = ?, description = ?, command_template = ?, requires_confirm = ?
+            SET name = ?, description = ?, command_template = ?, requires_confirm = ?, execution_target = ?
             WHERE id = ?
             """,
-            (name.strip(), description, command_template, 1 if requires_confirm else 0, action_id),
+            (name.strip(), description, command_template, 1 if requires_confirm else 0, execution_target, action_id),
         )
         self._conn.commit()
 
@@ -114,7 +119,7 @@ class ActionsStore:
         """Render and optionally execute an action on a server."""
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT id, name, description, command_template, requires_confirm FROM actions WHERE id = ?",
+            "SELECT id, name, description, command_template, requires_confirm, COALESCE(execution_target, 'local') as execution_target FROM actions WHERE id = ?",
             (action_id,),
         )
         arow = cur.fetchone()
@@ -126,6 +131,7 @@ class ActionsStore:
             description=arow["description"],
             command_template=arow["command_template"],
             requires_confirm=bool(arow["requires_confirm"]),
+            execution_target=arow["execution_target"],
         )
 
         server: Optional[Server] = self._servers.get_server(server_name)
@@ -163,6 +169,19 @@ class ActionsStore:
             duration_ms = 0
             stdout = ""
             stderr = ""
+        elif template.execution_target == "ssh":
+            host = choose_best_host(server)
+            if not host:
+                raise ValueError("No host available for SSH execution")
+            ssh_profile = self._idents.get_ssh_profile(server_name)
+            identity = None
+            if ssh_profile and ssh_profile.identity_id:
+                identity = self._idents.get_identity(ssh_profile.identity_id)
+            ec, out, err, duration_ms = execute_ssh(server, ssh_profile, identity, command_rendered)
+            status = "success" if ec == 0 else "error"
+            exit_code = ec
+            stdout = out or ""
+            stderr = err or ""
         else:
             ec, out, err, duration_ms = execute(command_rendered)
             status = "success" if ec == 0 else "error"
