@@ -58,6 +58,20 @@ class SqliteStore:
                 tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
                 PRIMARY KEY (server_id, tag_id)
             );
+
+            CREATE TABLE IF NOT EXISTS identities (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                name     TEXT UNIQUE NOT NULL,
+                username TEXT,
+                kind     TEXT NOT NULL CHECK (kind IN ('ssh_key_path','password','token'))
+            );
+
+            CREATE TABLE IF NOT EXISTS ssh_profiles (
+                server_id        INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+                port             INTEGER NOT NULL DEFAULT 22,
+                identity_id      INTEGER REFERENCES identities(id) ON DELETE SET NULL,
+                username_override TEXT
+            );
             """
         )
         self._conn.commit()

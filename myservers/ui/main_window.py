@@ -6,6 +6,7 @@ from __future__ import annotations
 Business logic lives in myservers/core; storage in myservers/storage.
 """
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -24,6 +25,9 @@ from PySide6.QtWidgets import (
 from myservers.core.models import Server, HostSet
 from myservers.core.servers import ServerStore
 from myservers.core.import_legacy import import_legacy_into_store
+from myservers.core.identities_store import IdentitiesStore, IdentityMeta, SshProfileMeta
+from myservers.core import identity as identity_core
+from myservers.storage.sqlite_store import SqliteStore
 
 
 class ServerDialog(QDialog):
@@ -72,6 +76,188 @@ class ServerDialog(QDialog):
         return Server(name=name, hosts=hosts)
 
 
+class IdentityManagerDialog(QDialog):
+    """Manage identities (metadata + keyring secrets)."""
+
+    def __init__(self, parent: QWidget | None, store: IdentitiesStore) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Identity Manager")
+        self._store = store
+
+        layout = QVBoxLayout(self)
+        self._list = QListWidget()
+        layout.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        self._add = QPushButton("Add")
+        self._edit = QPushButton("Edit")
+        self._delete = QPushButton("Delete")
+        btn_row.addWidget(self._add)
+        btn_row.addWidget(self._edit)
+        btn_row.addWidget(self._delete)
+        layout.addLayout(btn_row)
+
+        self._add.clicked.connect(self._on_add)
+        self._edit.clicked.connect(self._on_edit)
+        self._delete.clicked.connect(self._on_delete)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._list.clear()
+        for ident in self._store.list_identities():
+            item = QListWidgetItem(f"{ident.name} ({ident.kind})")
+            item.setData(Qt.UserRole, ident.id)
+            self._list.addItem(item)
+
+    def _selected_id(self) -> int | None:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        return int(item.data(Qt.UserRole))
+
+    def _edit_dialog(self, identity: IdentityMeta | None = None) -> tuple[str, str, str, str | None] | None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Identity")
+        form = QFormLayout(dlg)
+        name_edit = QLineEdit()
+        user_edit = QLineEdit()
+        kind_edit = QLineEdit()
+        secret_edit = QLineEdit()
+        secret_edit.setEchoMode(QLineEdit.Password)
+
+        if identity is not None:
+            name_edit.setText(identity.name)
+            user_edit.setText(identity.username or "")
+            kind_edit.setText(identity.kind)
+
+        form.addRow("Name", name_edit)
+        form.addRow("Username", user_edit)
+        form.addRow("Kind", kind_edit)
+        form.addRow("Secret", secret_edit)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        name = name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Identity", "Name is required.")
+            return None
+        username = user_edit.text().strip()
+        kind = kind_edit.text().strip() or "password"
+        secret = secret_edit.text()
+        return name, username, kind, secret or None
+
+    def _on_add(self) -> None:
+        data = self._edit_dialog(None)
+        if data is None:
+            return
+        name, username, kind, secret = data
+        identity_core.create_identity(self._store, name, username or None, kind, secret or "")
+        self._refresh()
+
+    def _on_edit(self) -> None:
+        identity_id = self._selected_id()
+        if identity_id is None:
+            QMessageBox.information(self, "Identity", "Select an identity first.")
+            return
+        current = self._store.get_identity(identity_id)
+        if current is None:
+            self._refresh()
+            return
+        data = self._edit_dialog(current)
+        if data is None:
+            return
+        name, username, kind, secret = data
+        identity_core.update_identity(self._store, identity_id, name, username or None, kind, secret)
+        self._refresh()
+
+    def _on_delete(self) -> None:
+        identity_id = self._selected_id()
+        if identity_id is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete identity",
+            "Delete selected identity?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        identity_core.delete_identity(self._store, identity_id)
+        self._refresh()
+
+
+class SshProfileDialog(QDialog):
+    """Edit SSH profile metadata for a server."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        profile: SshProfileMeta,
+        identities: list[IdentityMeta],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"SSH Settings - {profile.server_name}")
+        self._profile = profile
+        self._identities = identities
+
+        form = QFormLayout(self)
+        self._port_edit = QLineEdit(str(profile.port))
+        self._user_override = QLineEdit(profile.username_override or "")
+        self._identity_combo = QListWidget()
+
+        form.addRow("Port", self._port_edit)
+        form.addRow("Username override", self._user_override)
+        form.addRow("Identity", self._identity_combo)
+
+        none_item = QListWidgetItem("<None>")
+        none_item.setData(Qt.UserRole, None)
+        self._identity_combo.addItem(none_item)
+
+        for ident in identities:
+            item = QListWidgetItem(f"{ident.name} ({ident.kind})")
+            item.setData(Qt.UserRole, ident.id)
+            self._identity_combo.addItem(item)
+            if ident.id == profile.identity_id:
+                item.setSelected(True)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+    def get_profile(self) -> SshProfileMeta:
+        try:
+            port = int(self._port_edit.text())
+        except ValueError:
+            port = 22
+        selected_items = self._identity_combo.selectedItems()
+        identity_id = None
+        if selected_items:
+            identity_id = selected_items[0].data(Qt.UserRole)
+        username_override = self._user_override.text().strip() or None
+        return SshProfileMeta(
+            server_name=self._profile.server_name,
+            port=port,
+            identity_id=identity_id,
+            username_override=username_override,
+        )
+
+
 class MainWindow(QMainWindow):
     """v2 main window with thin UI and core-driven CRUD."""
 
@@ -93,16 +279,22 @@ class MainWindow(QMainWindow):
         self._add_btn = QPushButton("Add")
         self._edit_btn = QPushButton("Edit")
         self._del_btn = QPushButton("Delete")
+        self._ssh_btn = QPushButton("SSH Settings...")
+        self._identity_btn = QPushButton("Identity Manager...")
         self._import_btn = QPushButton("Import legacy JSON...")
         buttons.addWidget(self._add_btn)
         buttons.addWidget(self._edit_btn)
         buttons.addWidget(self._del_btn)
+        buttons.addWidget(self._ssh_btn)
+        buttons.addWidget(self._identity_btn)
         buttons.addWidget(self._import_btn)
         layout.addLayout(buttons)
 
         self._add_btn.clicked.connect(self._on_add)
         self._edit_btn.clicked.connect(self._on_edit)
         self._del_btn.clicked.connect(self._on_delete)
+        self._ssh_btn.clicked.connect(self._on_edit_ssh)
+        self._identity_btn.clicked.connect(self._on_open_identity_manager)
         self._import_btn.clicked.connect(self._on_import_legacy)
 
         self.setCentralWidget(central)
@@ -171,6 +363,49 @@ class MainWindow(QMainWindow):
             return
         self._store.delete_server(name)
         self._refresh_list()
+
+    def _ensure_sqlite_backend(self) -> SqliteStore | None:
+        backend = getattr(self._store, "_store", None)
+        if not isinstance(backend, SqliteStore):
+            QMessageBox.information(
+                self,
+                "Identities",
+                "Identities and SSH metadata are only available with the SQLite backend.",
+            )
+            return None
+        return backend
+
+    def _on_open_identity_manager(self) -> None:
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        store = IdentitiesStore(backend)
+        dlg = IdentityManagerDialog(self, store)
+        dlg.exec()
+
+    def _on_edit_ssh(self) -> None:
+        name = self._selected_name()
+        if not name:
+            QMessageBox.information(self, "SSH Settings", "Select a server first.")
+            return
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        ident_store = IdentitiesStore(backend)
+        profile = ident_store.get_ssh_profile(name) or SshProfileMeta(
+            server_name=name, port=22, identity_id=None, username_override=None
+        )
+        identities = ident_store.list_identities()
+        dlg = SshProfileDialog(self, profile, identities)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        updated = dlg.get_profile()
+        ident_store.set_ssh_profile(
+            name,
+            updated.port,
+            updated.identity_id,
+            updated.username_override,
+        )
 
     def _on_import_legacy(self) -> None:
         file_name, _ = QFileDialog.getOpenFileName(
