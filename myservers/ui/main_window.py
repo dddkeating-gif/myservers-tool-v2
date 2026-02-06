@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from myservers.core.models import Server, HostSet
 from myservers.core.servers import ServerStore
 from myservers.core.import_legacy import import_legacy_into_store
+from myservers.core.import_ssh_config import parse_ssh_config, apply_ssh_config_import
 from myservers.core.identities_store import IdentitiesStore, IdentityMeta, SshProfileMeta
 from myservers.core import identity as identity_core
 from myservers.core.web_links_store import WebLinksStore, WebLink
@@ -803,6 +804,7 @@ class MainWindow(QMainWindow):
         self._open_web_btn = QPushButton("Open Web...")
         self._actions_btn = QPushButton("Actions...")
         self._import_btn = QPushButton("Import legacy JSON...")
+        self._import_ssh_btn = QPushButton("Import SSH Config...")
         buttons.addWidget(self._add_btn)
         buttons.addWidget(self._edit_btn)
         buttons.addWidget(self._del_btn)
@@ -813,6 +815,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self._open_web_btn)
         buttons.addWidget(self._actions_btn)
         buttons.addWidget(self._import_btn)
+        buttons.addWidget(self._import_ssh_btn)
         layout.addLayout(buttons)
 
         self._add_btn.clicked.connect(self._on_add)
@@ -825,6 +828,7 @@ class MainWindow(QMainWindow):
         self._open_web_btn.clicked.connect(self._on_open_web)
         self._actions_btn.clicked.connect(self._on_open_actions)
         self._import_btn.clicked.connect(self._on_import_legacy)
+        self._import_ssh_btn.clicked.connect(self._on_import_ssh_config)
 
         self.setCentralWidget(central)
         self._refresh_list()
@@ -1024,6 +1028,101 @@ class MainWindow(QMainWindow):
             "Import legacy JSON",
             f"Imported {result.imported_count} server(s).\n"
             f"Renamed {result.renamed_count} due to name collisions.",
+        )
+        self._refresh_list()
+
+    def _on_import_ssh_config(self) -> None:
+        """Import SSH config entries into servers + ssh_profiles + identities."""
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+
+        # Default path: ~/.ssh/config
+        default_path = Path.home() / ".ssh" / "config"
+        start_dir = str(default_path.parent if default_path.parent.exists() else Path.home())
+
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import SSH Config",
+            start_dir,
+            "SSH config (config*);;All files (*)",
+        )
+        if not file_name:
+            return
+
+        try:
+            text = Path(file_name).read_text(encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "Import SSH Config", f"Failed to read file: {exc}")
+            return
+
+        candidates = parse_ssh_config(text)
+        if not candidates:
+            QMessageBox.information(self, "Import SSH Config", "No usable host entries found.")
+            return
+
+        # Preview dialog with checkboxes
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import SSH Config - Select Hosts")
+        layout = QVBoxLayout(dlg)
+        info = QLabel(
+            "Select the host entries to import.\n"
+            "Existing servers with the same name will be updated."
+        )
+        layout.addWidget(info)
+
+        list_widget = QListWidget()
+        for idx, cand in enumerate(candidates):
+            label = cand.host_alias
+            if cand.host_name and cand.host_name != cand.host_alias:
+                label += f"  ({cand.host_name})"
+            if cand.username:
+                label += f"  user={cand.username}"
+            if cand.port:
+                label += f"  port={cand.port}"
+            if cand.identity_file:
+                label += f"  key={cand.identity_file}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, idx)
+            item.setCheckState(Qt.Checked)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("Import selected")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        selected: list = []
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            if item.checkState() == Qt.Checked:
+                idx = int(item.data(Qt.UserRole))
+                selected.append(candidates[idx])
+
+        if not selected:
+            QMessageBox.information(self, "Import SSH Config", "No entries selected.")
+            return
+
+        server_store = self._store
+        identities = IdentitiesStore(backend)
+        try:
+            apply_ssh_config_import(selected, server_store, identities)
+        except Exception as exc:
+            QMessageBox.critical(self, "Import SSH Config", f"Import failed: {exc}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Import SSH Config",
+            f"Imported/updated {len(selected)} host entrie(s).",
         )
         self._refresh_list()
 
