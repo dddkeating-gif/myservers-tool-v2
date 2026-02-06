@@ -24,10 +24,12 @@ def create_identity(
     username: str | None,
     kind: str,
     secret: str,
+    key_path: str | None = None,
 ) -> int:
-    """Create identity metadata + store secret in keyring."""
-    identity_id = store.create_identity_metadata(name, username, kind)
-    keyring.set_password(SERVICE_NAME, _key(identity_id), secret)
+    """Create identity metadata + store secret in keyring (if not ssh_key_path)."""
+    identity_id = store.create_identity_metadata(name, username, kind, key_path)
+    if kind != "ssh_key_path" and secret:
+        keyring.set_password(SERVICE_NAME, _key(identity_id), secret)
     return identity_id
 
 
@@ -38,10 +40,11 @@ def update_identity(
     username: str | None,
     kind: str,
     secret_optional: Optional[str] = None,
+    key_path: str | None = None,
 ) -> None:
     """Update identity metadata and optionally rotate secret."""
-    store.update_identity_metadata(identity_id, name, username, kind)
-    if secret_optional is not None:
+    store.update_identity_metadata(identity_id, name, username, kind, key_path)
+    if secret_optional is not None and kind != "ssh_key_path":
         keyring.set_password(SERVICE_NAME, _key(identity_id), secret_optional)
 
 

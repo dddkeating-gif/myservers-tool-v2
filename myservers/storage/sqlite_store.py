@@ -25,6 +25,8 @@ class SqliteStore:
             self._init_schema()
             if json_migration_path is not None and Path(json_migration_path).exists():
                 self._migrate_from_json(Path(json_migration_path))
+        else:
+            self._migrate_schema()
 
     # ---------- schema & migration ----------
 
@@ -63,7 +65,8 @@ class SqliteStore:
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
                 name     TEXT UNIQUE NOT NULL,
                 username TEXT,
-                kind     TEXT NOT NULL CHECK (kind IN ('ssh_key_path','password','token'))
+                kind     TEXT NOT NULL CHECK (kind IN ('ssh_key_path','password','token')),
+                key_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ssh_profiles (
@@ -72,8 +75,40 @@ class SqliteStore:
                 identity_id      INTEGER REFERENCES identities(id) ON DELETE SET NULL,
                 username_override TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS web_links (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                label      TEXT NOT NULL,
+                url        TEXT NOT NULL
+            );
             """
         )
+        self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Add new columns/tables to existing databases."""
+        cur = self._conn.cursor()
+        # Add key_path to identities if missing
+        cur.execute("PRAGMA table_info(identities)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "key_path" not in cols:
+            cur.execute("ALTER TABLE identities ADD COLUMN key_path TEXT")
+        # Add web_links table if missing
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='web_links'"
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                """
+                CREATE TABLE web_links (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    label      TEXT NOT NULL,
+                    url        TEXT NOT NULL
+                )
+                """
+            )
         self._conn.commit()
 
     def _migrate_from_json(self, json_path: Path) -> None:

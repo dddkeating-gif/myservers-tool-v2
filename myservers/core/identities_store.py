@@ -12,6 +12,7 @@ class IdentityMeta:
     name: str
     username: str | None
     kind: str
+    key_path: str | None
 
 
 @dataclass
@@ -33,13 +34,14 @@ class IdentitiesStore:
 
     def list_identities(self) -> List[IdentityMeta]:
         cur = self._conn.cursor()
-        cur.execute("SELECT id, name, username, kind FROM identities ORDER BY name")
+        cur.execute("SELECT id, name, username, kind, key_path FROM identities ORDER BY name")
         return [
             IdentityMeta(
                 id=row["id"],
                 name=row["name"],
                 username=row["username"],
                 kind=row["kind"],
+                key_path=row["key_path"],
             )
             for row in cur.fetchall()
         ]
@@ -47,7 +49,7 @@ class IdentitiesStore:
     def get_identity(self, identity_id: int) -> Optional[IdentityMeta]:
         cur = self._conn.cursor()
         cur.execute(
-            "SELECT id, name, username, kind FROM identities WHERE id = ?",
+            "SELECT id, name, username, kind, key_path FROM identities WHERE id = ?",
             (identity_id,),
         )
         row = cur.fetchone()
@@ -58,13 +60,16 @@ class IdentitiesStore:
             name=row["name"],
             username=row["username"],
             kind=row["kind"],
+            key_path=row["key_path"],
         )
 
-    def create_identity_metadata(self, name: str, username: str | None, kind: str) -> int:
+    def create_identity_metadata(
+        self, name: str, username: str | None, kind: str, key_path: str | None = None
+    ) -> int:
         cur = self._conn.cursor()
         cur.execute(
-            "INSERT INTO identities(name, username, kind) VALUES (?, ?, ?)",
-            (name.strip(), (username or "").strip() or None, kind),
+            "INSERT INTO identities(name, username, kind, key_path) VALUES (?, ?, ?, ?)",
+            (name.strip(), (username or "").strip() or None, kind, (key_path or "").strip() or None),
         )
         self._conn.commit()
         return int(cur.lastrowid)
@@ -75,11 +80,12 @@ class IdentitiesStore:
         name: str,
         username: str | None,
         kind: str,
+        key_path: str | None = None,
     ) -> None:
         cur = self._conn.cursor()
         cur.execute(
-            "UPDATE identities SET name = ?, username = ?, kind = ? WHERE id = ?",
-            (name.strip(), (username or "").strip() or None, kind, identity_id),
+            "UPDATE identities SET name = ?, username = ?, kind = ?, key_path = ? WHERE id = ?",
+            (name.strip(), (username or "").strip() or None, kind, (key_path or "").strip() or None, identity_id),
         )
         self._conn.commit()
 

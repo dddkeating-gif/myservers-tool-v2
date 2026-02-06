@@ -6,8 +6,12 @@ from __future__ import annotations
 Business logic lives in myservers/core; storage in myservers/storage.
 """
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QClipboard, QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -27,7 +31,9 @@ from myservers.core.servers import ServerStore
 from myservers.core.import_legacy import import_legacy_into_store
 from myservers.core.identities_store import IdentitiesStore, IdentityMeta, SshProfileMeta
 from myservers.core import identity as identity_core
+from myservers.core.web_links_store import WebLinksStore, WebLink
 from myservers.storage.sqlite_store import SqliteStore
+from myservers.connectors.ssh_command import build_ssh_command
 
 
 class ServerDialog(QDialog):
@@ -116,13 +122,14 @@ class IdentityManagerDialog(QDialog):
             return None
         return int(item.data(Qt.UserRole))
 
-    def _edit_dialog(self, identity: IdentityMeta | None = None) -> tuple[str, str, str, str | None] | None:
+    def _edit_dialog(self, identity: IdentityMeta | None = None) -> tuple[str, str, str, str | None, str | None] | None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Identity")
         form = QFormLayout(dlg)
         name_edit = QLineEdit()
         user_edit = QLineEdit()
         kind_edit = QLineEdit()
+        key_path_edit = QLineEdit()
         secret_edit = QLineEdit()
         secret_edit.setEchoMode(QLineEdit.Password)
 
@@ -130,11 +137,13 @@ class IdentityManagerDialog(QDialog):
             name_edit.setText(identity.name)
             user_edit.setText(identity.username or "")
             kind_edit.setText(identity.kind)
+            key_path_edit.setText(identity.key_path or "")
 
         form.addRow("Name", name_edit)
         form.addRow("Username", user_edit)
         form.addRow("Kind", kind_edit)
-        form.addRow("Secret", secret_edit)
+        form.addRow("Key Path (for ssh_key_path)", key_path_edit)
+        form.addRow("Secret (for password/token)", secret_edit)
 
         btns = QHBoxLayout()
         ok_btn = QPushButton("OK")
@@ -153,15 +162,16 @@ class IdentityManagerDialog(QDialog):
             return None
         username = user_edit.text().strip()
         kind = kind_edit.text().strip() or "password"
+        key_path = key_path_edit.text().strip() or None
         secret = secret_edit.text()
-        return name, username, kind, secret or None
+        return name, username, kind, secret or None, key_path
 
     def _on_add(self) -> None:
         data = self._edit_dialog(None)
         if data is None:
             return
-        name, username, kind, secret = data
-        identity_core.create_identity(self._store, name, username or None, kind, secret or "")
+        name, username, kind, secret, key_path = data
+        identity_core.create_identity(self._store, name, username or None, kind, secret or "", key_path)
         self._refresh()
 
     def _on_edit(self) -> None:
@@ -176,8 +186,8 @@ class IdentityManagerDialog(QDialog):
         data = self._edit_dialog(current)
         if data is None:
             return
-        name, username, kind, secret = data
-        identity_core.update_identity(self._store, identity_id, name, username or None, kind, secret)
+        name, username, kind, secret, key_path = data
+        identity_core.update_identity(self._store, identity_id, name, username or None, kind, secret, key_path)
         self._refresh()
 
     def _on_delete(self) -> None:
@@ -258,6 +268,160 @@ class SshProfileDialog(QDialog):
         )
 
 
+class WebLinksDialog(QDialog):
+    """Edit web links for a server."""
+
+    def __init__(self, parent: QWidget | None, server_name: str, store: WebLinksStore) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Web Links - {server_name}")
+        self._server_name = server_name
+        self._store = store
+
+        layout = QVBoxLayout(self)
+        self._list = QListWidget()
+        layout.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        self._add = QPushButton("Add")
+        self._edit = QPushButton("Edit")
+        self._delete = QPushButton("Delete")
+        btn_row.addWidget(self._add)
+        btn_row.addWidget(self._edit)
+        btn_row.addWidget(self._delete)
+        layout.addLayout(btn_row)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("Close")
+        ok_btn.clicked.connect(self.accept)
+        btns.addWidget(ok_btn)
+        layout.addLayout(btns)
+
+        self._add.clicked.connect(self._on_add)
+        self._edit.clicked.connect(self._on_edit)
+        self._delete.clicked.connect(self._on_delete)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._list.clear()
+        for link in self._store.list_links(self._server_name):
+            item = QListWidgetItem(f"{link.label}: {link.url}")
+            item.setData(Qt.UserRole, link.id)
+            self._list.addItem(item)
+
+    def _selected_id(self) -> int | None:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        return int(item.data(Qt.UserRole))
+
+    def _edit_dialog(self, link: WebLink | None = None) -> tuple[str, str] | None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Web Link")
+        form = QFormLayout(dlg)
+        label_edit = QLineEdit()
+        url_edit = QLineEdit()
+
+        if link is not None:
+            label_edit.setText(link.label)
+            url_edit.setText(link.url)
+
+        form.addRow("Label", label_edit)
+        form.addRow("URL", url_edit)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        form.addRow(btns)
+
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        label = label_edit.text().strip()
+        url = url_edit.text().strip()
+        if not label or not url:
+            QMessageBox.warning(self, "Web Link", "Label and URL are required.")
+            return None
+        return label, url
+
+    def _on_add(self) -> None:
+        data = self._edit_dialog(None)
+        if data is None:
+            return
+        label, url = data
+        self._store.create_link(self._server_name, label, url)
+        self._refresh()
+
+    def _on_edit(self) -> None:
+        link_id = self._selected_id()
+        if link_id is None:
+            QMessageBox.information(self, "Web Link", "Select a link first.")
+            return
+        links = self._store.list_links(self._server_name)
+        current = next((l for l in links if l.id == link_id), None)
+        if current is None:
+            self._refresh()
+            return
+        data = self._edit_dialog(current)
+        if data is None:
+            return
+        label, url = data
+        self._store.update_link(link_id, label, url)
+        self._refresh()
+
+    def _on_delete(self) -> None:
+        link_id = self._selected_id()
+        if link_id is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete link",
+            "Delete selected link?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._store.delete_link(link_id)
+        self._refresh()
+
+
+class WebLinkPickerDialog(QDialog):
+    """Pick a web link from multiple options."""
+
+    def __init__(self, parent: QWidget | None, links: list[WebLink]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select Web Link")
+        self._links = links
+
+        layout = QVBoxLayout(self)
+        self._list = QListWidget()
+        for link in links:
+            item = QListWidgetItem(f"{link.label}: {link.url}")
+            item.setData(Qt.UserRole, link.id)
+            self._list.addItem(item)
+        layout.addWidget(self._list)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("Open")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+    def get_selected(self) -> WebLink | None:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        link_id = int(item.data(Qt.UserRole))
+        return next((l for l in self._links if l.id == link_id), None)
+
+
 class MainWindow(QMainWindow):
     """v2 main window with thin UI and core-driven CRUD."""
 
@@ -281,12 +445,18 @@ class MainWindow(QMainWindow):
         self._del_btn = QPushButton("Delete")
         self._ssh_btn = QPushButton("SSH Settings...")
         self._identity_btn = QPushButton("Identity Manager...")
+        self._copy_ssh_btn = QPushButton("Copy SSH Command")
+        self._web_links_btn = QPushButton("Web Links...")
+        self._open_web_btn = QPushButton("Open Web...")
         self._import_btn = QPushButton("Import legacy JSON...")
         buttons.addWidget(self._add_btn)
         buttons.addWidget(self._edit_btn)
         buttons.addWidget(self._del_btn)
         buttons.addWidget(self._ssh_btn)
         buttons.addWidget(self._identity_btn)
+        buttons.addWidget(self._copy_ssh_btn)
+        buttons.addWidget(self._web_links_btn)
+        buttons.addWidget(self._open_web_btn)
         buttons.addWidget(self._import_btn)
         layout.addLayout(buttons)
 
@@ -295,6 +465,9 @@ class MainWindow(QMainWindow):
         self._del_btn.clicked.connect(self._on_delete)
         self._ssh_btn.clicked.connect(self._on_edit_ssh)
         self._identity_btn.clicked.connect(self._on_open_identity_manager)
+        self._copy_ssh_btn.clicked.connect(self._on_copy_ssh_command)
+        self._web_links_btn.clicked.connect(self._on_edit_web_links)
+        self._open_web_btn.clicked.connect(self._on_open_web)
         self._import_btn.clicked.connect(self._on_import_legacy)
 
         self.setCentralWidget(central)
@@ -406,6 +579,65 @@ class MainWindow(QMainWindow):
             updated.identity_id,
             updated.username_override,
         )
+
+    def _on_copy_ssh_command(self) -> None:
+        name = self._selected_name()
+        if not name:
+            QMessageBox.information(self, "Copy SSH Command", "Select a server first.")
+            return
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        server = self._store.get_server(name)
+        if not server:
+            QMessageBox.warning(self, "Copy SSH Command", "Server not found.")
+            return
+        ident_store = IdentitiesStore(backend)
+        profile = ident_store.get_ssh_profile(name)
+        identity = None
+        if profile and profile.identity_id:
+            identity = ident_store.get_identity(profile.identity_id)
+        cmd = build_ssh_command(server, profile, identity)
+        if not cmd:
+            QMessageBox.information(self, "Copy SSH Command", "No host configured for this server.")
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(cmd)
+        QMessageBox.information(self, "Copy SSH Command", f"Copied:\n{cmd}")
+
+    def _on_edit_web_links(self) -> None:
+        name = self._selected_name()
+        if not name:
+            QMessageBox.information(self, "Web Links", "Select a server first.")
+            return
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        links_store = WebLinksStore(backend)
+        dlg = WebLinksDialog(self, name, links_store)
+        dlg.exec()
+
+    def _on_open_web(self) -> None:
+        name = self._selected_name()
+        if not name:
+            QMessageBox.information(self, "Open Web", "Select a server first.")
+            return
+        backend = self._ensure_sqlite_backend()
+        if backend is None:
+            return
+        links_store = WebLinksStore(backend)
+        links = links_store.list_links(name)
+        if not links:
+            QMessageBox.information(self, "Open Web", "No web links configured for this server.")
+            return
+        if len(links) == 1:
+            QDesktopServices.openUrl(links[0].url)
+        else:
+            dlg = WebLinkPickerDialog(self, links)
+            if dlg.exec() == QDialog.Accepted:
+                selected = dlg.get_selected()
+                if selected:
+                    QDesktopServices.openUrl(selected.url)
 
     def _on_import_legacy(self) -> None:
         file_name, _ = QFileDialog.getOpenFileName(
