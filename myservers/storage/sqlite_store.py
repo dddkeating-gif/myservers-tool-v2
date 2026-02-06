@@ -82,6 +82,28 @@ class SqliteStore:
                 label      TEXT NOT NULL,
                 url        TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS actions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                name             TEXT UNIQUE NOT NULL,
+                description      TEXT,
+                command_template TEXT NOT NULL,
+                requires_confirm INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS action_runs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_id       INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+                server_id       INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                started_at      TEXT,
+                finished_at     TEXT,
+                status          TEXT,
+                exit_code       INTEGER,
+                duration_ms     INTEGER,
+                command_rendered TEXT,
+                stdout          TEXT,
+                stderr          TEXT
+            );
             """
         )
         self._conn.commit()
@@ -106,6 +128,44 @@ class SqliteStore:
                     server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
                     label      TEXT NOT NULL,
                     url        TEXT NOT NULL
+                )
+                """
+            )
+        # Add actions table if missing
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='actions'"
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                """
+                CREATE TABLE actions (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name             TEXT UNIQUE NOT NULL,
+                    description      TEXT,
+                    command_template TEXT NOT NULL,
+                    requires_confirm INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+        # Add action_runs table if missing
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='action_runs'"
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                """
+                CREATE TABLE action_runs (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action_id       INTEGER NOT NULL REFERENCES actions(id) ON DELETE CASCADE,
+                    server_id       INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    started_at      TEXT,
+                    finished_at     TEXT,
+                    status          TEXT,
+                    exit_code       INTEGER,
+                    duration_ms     INTEGER,
+                    command_rendered TEXT,
+                    stdout          TEXT,
+                    stderr          TEXT
                 )
                 """
             )
